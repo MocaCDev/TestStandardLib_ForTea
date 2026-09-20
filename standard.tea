@@ -1,0 +1,146 @@
+#lib
+
+/* This struct will "intercept" a piece of metadata from the compiler and build an in-language representation
+ * of the data.
+ * */
+[role=COMPILER_INTERCEPTOR, intercept_with="intercept"]
+struct InternalRep shellof CompilerDispatch
+{
+    type:       BuiltInType,
+    size:       uint64,
+    value:      BuiltInType_RawValue
+}
+
+enum CompilerMetadataType
+{
+    NONE,
+    VariableDecl
+}
+
+/* Used in conjunction with `CompilerVariableDeclMetadata`. */
+enum DependsOn
+{
+    FUNCTION_CALL,
+    FUNCTION_ARGUMENT,
+    EXISTING_VARIABLE,
+    VARIABLE_CREATION_AND_ALLOCATION,
+    STRUCT_METHOD_CALL
+}
+
+struct Depends
+{
+    on: DependsOn,
+    dependent_value: string,
+    arguments: map<string, RawBuiltInTypesExtended>,
+    cd: CompilerDispatch
+}
+
+struct CompilerVariableDeclMetadata
+{
+    variable: Variable,
+    depends: Depends,
+    got_assigned: bool,
+    is_dependent: bool
+}
+
+attach InternalRep
+{
+    [needs=DISPATCH_CHANNEL]
+    [role=FORCE_COMPILER_ERROR]
+    fun intercept(cd: CompilerDispatch) -> InternalRep
+    {
+        const? metadata_type: CompilerMetadataType = cd.dispatch("REQUEST", "metadata_type")
+        var? internal_rep: InternalRep
+
+        if metadata_type == NONE { !!"Compiler intercept `InternalRep` intercepted empty metadata, this is an error" }
+
+        switch metadata_type
+        {
+            case VariableDecl:
+            {
+                const? variable_decl_metadata: CompilerVariableDeclMetadata = cd.dispatch("REQUEST", "metadata")
+
+                internal_rep.type = variable_decl_metadata.variable.variable_type
+                internal_rep.size = sizeof(internal_rep.type)
+                internal_rep.value = variable_decl_metadata.variable.variable_value
+
+                cd.dispatch("FINISH", variable_decl_metadata.ctc())
+
+                break
+            }
+        }
+
+        return internal_rep.ctc()
+    }
+}
+
+[role=ENFORCER, binder="integral_enforcer_init"]
+struct integral empty shellof CompilerDispatch {}
+
+[role=ENFORCER, binder="floating_point_enforcer_init"]
+struct floating_point empty shellof CompilerDispatch {}
+
+attach integral
+{
+    [needs=DISPATCH_CHANNEL]
+    fun integral_enforcer_init(cd: CompilerDispatch) -> None
+    {
+        cd.enforcer_dispatch({
+            rule: EnforcerPolicy{
+                evaluator: "evaluator",
+                eval_error: "The type is not an integral",
+                /* By setting compatabilities, this enforcer can be used in conjunction with other enforcers
+                 * outlines in the array.
+                 *
+                 * It is possible, then, that one enforcer is compatible with another, but the other is not compatible with the one.
+                 * Example: "integral" enforcer can be compatible with "floating_point", which implies having the two together in an enforcement (`integral,floating_point`)
+                 *          will work; however, if "floating_point" does not list "integral" as compatible then `floating_point,integral` will result in:
+                 *          "Error: The enforcer `floating_point` is not compatible with `integral`."
+                 * 
+                 * Listing compatabilities just extends *how* the compiler will handle compiling; if it's `integral, floating_point` and `integral` enforcement fails the compiler
+                 * knows not to error and evaluate `floating_point` enforcement and will fail on that. If it's just `integral` and it fails, it will fail.
+                 * */
+                compatabilities: [ "floating_point" ]
+            }
+        })
+    }
+
+    [needs=DISPATCH_CHANNEL]
+    [role=FORCE_COMPILER_ERROR, on="BOOLEAN", value=false] // force compiler to error if below function returns false
+    fun evaluator(value: InternalRep) -> bool
+    {
+        const? integral_types: [BuiltInType] = cd.dispatch("REQUEST", "built_in_integer_types")
+
+        if !integral_types.contains(cd.dispatch("REQUEST", "provided_type")) return false
+
+        return true
+    }
+}
+
+attach floating_point
+{
+    [needs=DISPATCH_CHANNEL]
+    fun floating_point_enforcer_init(cd: CompilerDispatch) -> None
+    {
+        cd.enforcer_dispatch({
+            rule: EnforcerPolicy{
+                evaluator: "evaluator",
+                eval_error: "The type is not a floating-point value",
+                compatabilities: [ "integral" ]
+            }
+        })
+    }
+
+    [needs=DISPATCH_CHANNEL]
+    [role=FORCE_COMPILER_ERROR, on="BOOLEAN", value=false] // force compiler to error if below function returns false
+    fun evaluator(cd: CompilerDispatch) -> bool
+    {
+        const? float_types: [BuiltInType] = cd.dispatch("REQUEST", "built_in_float_types")
+
+        if !float_types.contains(cd.dispatch("REQUEST", "provided_type")) return false
+
+        return true
+    }
+}
+
+generic struct<T: integral,floating_point> tanh empty shellof Math {}
